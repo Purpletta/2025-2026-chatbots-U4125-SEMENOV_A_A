@@ -5,5 +5,6 @@ __pycache__/
 .Python
 .env
 data.json
+database.db
 *.log
 .DS_Store
