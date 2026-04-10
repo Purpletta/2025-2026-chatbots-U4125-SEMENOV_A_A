@@ -10,9 +10,11 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import re
 import sqlite3
 import tempfile
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -975,8 +977,10 @@ def main() -> None:
     # --- Flask webhook server ---
     flask_app = Flask(__name__)
 
-    # Shared event loop that Flask routes post updates into
-    loop = asyncio.new_event_loop()
+    # Цикл asyncio создаётся в том же потоке, где он крутится (иначе PTB/asyncio нестабильны).
+    # Потокобезопасная ссылка для run_coroutine_threadsafe из обработчика Flask.
+    loop_holder: list[asyncio.AbstractEventLoop | None] = [None]
+    ptb_ready = threading.Event()
 
     @flask_app.get("/")
     def health_check() -> Response:
@@ -984,13 +988,15 @@ def main() -> None:
 
     @flask_app.post("/webhook")
     def webhook() -> Response:
+        if not ptb_ready.is_set() or loop_holder[0] is None:
+            return Response("Service Unavailable", status=503, mimetype="text/plain")
         data = request.get_json(force=True, silent=True)
         if data is None:
             return Response("Bad Request", status=400, mimetype="text/plain")
         try:
             update = Update.de_json(data, ptb_app.bot)
             asyncio.run_coroutine_threadsafe(
-                ptb_app.process_update(update), loop
+                ptb_app.process_update(update), loop_holder[0]
             ).result(timeout=60)
         except Exception as exc:
             logger.exception("Ошибка при обработке webhook-update: %s", exc)
@@ -1002,23 +1008,30 @@ def main() -> None:
         await ptb_app.initialize()
         await ptb_app.start()
         logger.info("PTB запущен в режиме webhook; база данных: %s", DB_PATH)
+        ptb_ready.set()
         # Run forever — Flask runs in the main thread, PTB lives in this loop
         await asyncio.Event().wait()
 
-    import threading
-
     def start_event_loop() -> None:
+        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        loop_holder[0] = loop
         try:
             loop.run_until_complete(run_ptb())
         finally:
-            loop.run_until_complete(ptb_app.stop())
-            loop.run_until_complete(ptb_app.shutdown())
+            try:
+                loop.run_until_complete(ptb_app.stop())
+                loop.run_until_complete(ptb_app.shutdown())
+            except Exception:
+                logger.exception("Ошибка при остановке PTB")
             conn.close()
             logger.info("Соединение с БД закрыто")
 
     ptb_thread = threading.Thread(target=start_event_loop, daemon=True)
     ptb_thread.start()
+    if not ptb_ready.wait(timeout=120):
+        logger.error("PTB не успел инициализироваться за 120 с")
+        sys.exit(1)
 
     port = int(os.environ.get("PORT", 8000))
     logger.info("Запуск Flask на порту %s", port)
