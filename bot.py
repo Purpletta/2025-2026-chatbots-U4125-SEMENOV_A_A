@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import re
 import sqlite3
 import tempfile
@@ -919,8 +918,10 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Ошибка при обработке update: %s", context.error)
 
 
-def main() -> None:
+def build_app() -> Flask:
+    """Собирает Flask-приложение и фоновый поток PTB (для webhook). Для Railway: gunicorn bot:app."""
     load_dotenv()
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     token = os.environ.get("BOT_TOKEN", "").strip()
     if not token:
         logger.error(
@@ -1029,14 +1030,16 @@ def main() -> None:
 
     ptb_thread = threading.Thread(target=start_event_loop, daemon=True)
     ptb_thread.start()
-    if not ptb_ready.wait(timeout=120):
-        logger.error("PTB не успел инициализироваться за 120 с")
-        sys.exit(1)
 
-    port = int(os.environ.get("PORT", 8000))
-    logger.info("Запуск Flask на порту %s", port)
-    flask_app.run(host="0.0.0.0", port=port)
+    # Нельзя ждать PTB до открытия HTTP-порта: иначе у edge Railway — connection refused.
+    # Webhook отвечает 503, пока ptb_ready не выставлен.
+    return flask_app
+
+
+app = build_app()
 
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8000))
+    logger.info("Локальный запуск Flask (dev) на порту %s", port)
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
