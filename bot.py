@@ -1020,7 +1020,7 @@ def main() -> None:
     ptb_thread = threading.Thread(target=start_event_loop, daemon=True)
     ptb_thread.start()
 
-    port = 443
+    port = int(os.environ.get("PORT", 8000))
     logger.info("Запуск Flask на порту %s", port)
     flask_app.run(host="0.0.0.0", port=port)
 
