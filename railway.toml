@@ -1,0 +1,10 @@
+# Явная команда деплоя: Nixpacks иногда игнорирует только Procfile или подставляет `python bot.py`.
+# Edge должен проксировать на процесс, слушающий 0.0.0.0:$PORT (Gunicorn).
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT -t 120 bot:app"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
