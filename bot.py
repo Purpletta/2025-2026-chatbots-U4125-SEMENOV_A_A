@@ -477,7 +477,8 @@ def build_chart_last_7_days(
     ax.set_title("Привычки: активность за последние 7 дней")
     fig.tight_layout()
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png", dir=str(BASE_DIR))
+    # Временный PNG в системном каталоге (/tmp и т.д.) — надёжнее на хостинге (Railway), чем рядом с кодом
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     tmp_path = Path(tmp.name)
     tmp.close()
     try:
@@ -918,8 +919,11 @@ def main() -> None:
     load_dotenv()
     token = os.environ.get("BOT_TOKEN", "").strip()
     if not token:
-        logger.error("Задайте BOT_TOKEN в .env")
+        logger.error(
+            "Не задан BOT_TOKEN. Локально: файл .env. На Railway: Variables → BOT_TOKEN."
+        )
         raise SystemExit(1)
+    logger.info("BOT_TOKEN загружен из окружения (длина %s символов)", len(token))
 
     conn = connect_db()
     try:
@@ -966,7 +970,7 @@ def main() -> None:
 
     app.add_error_handler(on_error)
 
-    logger.info("Бот запущен (SQLite: %s)", DB_PATH)
+    logger.info("Запуск long polling; база данных: %s", DB_PATH)
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
