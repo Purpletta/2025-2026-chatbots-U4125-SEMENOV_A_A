@@ -6,6 +6,7 @@ Telegram-бот: трекер привычек.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from dotenv import load_dotenv
+from flask import Flask, Response, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -935,8 +937,8 @@ def main() -> None:
         conn.close()
         raise SystemExit(1) from e
 
-    app = Application.builder().token(token).build()
-    app.bot_data["db"] = conn
+    ptb_app = Application.builder().token(token).build()
+    ptb_app.bot_data["db"] = conn
 
     add_conv = ConversationHandler(
         entry_points=[
@@ -955,27 +957,72 @@ def main() -> None:
         persistent=False,
     )
 
-    app.add_handler(add_conv)
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_HELP)}$"), show_help))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_LIST)}$"), show_list))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_STATS)}$"), show_stats))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_PROGRESS)}$"), show_progress))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_CHART)}$"), send_chart))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_DONE)}$"), prompt_done))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_DELETE)}$"), prompt_delete))
-    app.add_handler(CallbackQueryHandler(on_done_callback, pattern=r"^done:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_delete_callback, pattern=r"^del:\d+$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text))
+    ptb_app.add_handler(add_conv)
+    ptb_app.add_handler(CommandHandler("start", cmd_start))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_HELP)}$"), show_help))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_LIST)}$"), show_list))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_STATS)}$"), show_stats))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_PROGRESS)}$"), show_progress))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_CHART)}$"), send_chart))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_DONE)}$"), prompt_done))
+    ptb_app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_DELETE)}$"), prompt_delete))
+    ptb_app.add_handler(CallbackQueryHandler(on_done_callback, pattern=r"^done:\d+$"))
+    ptb_app.add_handler(CallbackQueryHandler(on_delete_callback, pattern=r"^del:\d+$"))
+    ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text))
 
-    app.add_error_handler(on_error)
+    ptb_app.add_error_handler(on_error)
 
-    logger.info("Запуск long polling; база данных: %s", DB_PATH)
-    try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-    finally:
-        conn.close()
-        logger.info("Соединение с БД закрыто")
+    # --- Flask webhook server ---
+    flask_app = Flask(__name__)
+
+    # Shared event loop that Flask routes post updates into
+    loop = asyncio.new_event_loop()
+
+    @flask_app.get("/")
+    def health_check() -> Response:
+        return Response("OK", status=200, mimetype="text/plain")
+
+    @flask_app.post("/webhook")
+    def webhook() -> Response:
+        data = request.get_json(force=True, silent=True)
+        if data is None:
+            return Response("Bad Request", status=400, mimetype="text/plain")
+        try:
+            update = Update.de_json(data, ptb_app.bot)
+            asyncio.run_coroutine_threadsafe(
+                ptb_app.process_update(update), loop
+            ).result(timeout=60)
+        except Exception as exc:
+            logger.exception("Ошибка при обработке webhook-update: %s", exc)
+            return Response("Internal Server Error", status=500, mimetype="text/plain")
+        return Response("OK", status=200, mimetype="text/plain")
+
+    async def run_ptb() -> None:
+        """Initialise PTB and keep the event loop alive for update processing."""
+        await ptb_app.initialize()
+        await ptb_app.start()
+        logger.info("PTB запущен в режиме webhook; база данных: %s", DB_PATH)
+        # Run forever — Flask runs in the main thread, PTB lives in this loop
+        await asyncio.Event().wait()
+
+    import threading
+
+    def start_event_loop() -> None:
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run_ptb())
+        finally:
+            loop.run_until_complete(ptb_app.stop())
+            loop.run_until_complete(ptb_app.shutdown())
+            conn.close()
+            logger.info("Соединение с БД закрыто")
+
+    ptb_thread = threading.Thread(target=start_event_loop, daemon=True)
+    ptb_thread.start()
+
+    port = int(os.environ.get("PORT", 8000))
+    logger.info("Запуск Flask на порту %s", port)
+    flask_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
